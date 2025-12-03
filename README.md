@@ -2,12 +2,11 @@
 
 **1st Place Solution of the ICCV 2025 AI City Challenge, Track 3.**
 
-📄 [Paper on arXiv](https://arxiv.org/abs/2507.10778v1)
+📄 **[ICCVW 2025 Paper](https://openaccess.thecvf.com/content/ICCV2025W/AICity/papers/Huang_Warehouse_Spatial_Question_Answering_with_LLM_Agent_1st_Place_Solution_ICCVW_2025_paper.pdf)**
 
 <p align="center">
   <img src="asset/leaderboard.png" alt="Leaderboard Result"/>
 </p>
-
 
 ---
 
@@ -112,3 +111,21 @@ python train.py
 cd inside_pred
 python train.py
 ```
+
+
+---
+
+## 📚 Citation
+
+If you find this work useful, please cite our ICCV Workshop 2025 paper, thank you!
+
+```bibtex
+@InProceedings{Huang_2025_ICCV,
+    author    = {Huang, Hsiang-Wei and Kim, Pyongkun and Cheng, Jen-Hao and Chen, Kuang-Ming and Yang, Cheng-Yen and Alattar, Bahaa and Lin, Yi-Ru and Kim, Sangwon and Kim, Kwangju and Huang, Chung-I and Hwang, Jenq-Neng},
+    title     = {Warehouse Spatial Question Answering with LLM Agent: 1st Place Solution of the 9th AI City Challenge Track 3},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) Workshops},
+    month     = {October},
+    year      = {2025},
+    pages     = {5224-5228}
+}
+
