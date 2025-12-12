@@ -3,21 +3,21 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from data_loader import DistanceDataset
-from model import ResNetDistanceRegressor
+from model import DistanceRegressor
 
-# dataset = DistanceDataset('../train', '../train/train_distance_refined_full.json', rgb=False, depth=False)
-# loader = DataLoader(dataset, batch_size=36, shuffle=True, num_workers=4)
+# Argument parsing if needed, or simple implementation
+USE_DEPTH = True
+BACKBONE = 'convnext_tiny' # resnet50, convnext_tiny, etc.
 
-# model = ResNetDistanceRegressor(input_channels=2, backbone='resnet50', pretrained=True).cuda()
-# optimizer = optim.Adam(model.parameters(), lr=1e-4)
-# criterion = nn.MSELoss()
-
-dataset = DistanceDataset('../data/train', '../data/train/train_dist_est.json', rgb=True, depth=False)
+dataset = DistanceDataset('../data/train', '../data/train/train_dist_est.json', rgb=True, depth=USE_DEPTH)
 loader = DataLoader(dataset, batch_size=36, shuffle=True, num_workers=4)
 
-model = ResNetDistanceRegressor(input_channels=5, backbone='resnet50', pretrained=True).cuda()
-# load from ckpt
-model.load_state_dict(torch.load('ckpt_RGB_mask_cm_wrong_ratio(best)/epoch_5_iter_6831.pth'))
+input_channels = 5 + int(USE_DEPTH) # 5 (RGB + 2 Masks) + Depth
+print(f"Initializing model with backbone={BACKBONE}, input_channels={input_channels}")
+
+model = DistanceRegressor(input_channels=input_channels, backbone=BACKBONE, pretrained=True).cuda()
+# Commenting out load_state_dict for new training since architecture/channels changed
+# model.load_state_dict(torch.load('ckpt/epoch_5_iter_6831.pth')) 
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 criterion = nn.MSELoss()
 
@@ -25,7 +25,8 @@ print(f"Dataset size: {len(dataset)}")
 print(f"Number of batches: {len(loader)}")
 
 # Training loop
-num_epochs = 5
+num_epochs = 1
+# Limit batches for dry run if needed, but for now we'll just run it.
 for epoch in range(num_epochs):
     print(f"Starting epoch {epoch + 1}/{num_epochs}")
     model.train()
