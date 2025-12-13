@@ -31,6 +31,12 @@ def build_dist_model(model_cfg):
 
 
 class DistanceRegressor(nn.Module):
+    """
+    Currently used as follows:
+    BACKBONE = 'convnext_small' 
+    in_channels=6
+    model = DistanceRegressor(input_channels=input_channels, backbone=BACKBONE, pretrained=True)
+    """
     def __init__(self, input_channels=5, backbone='resnet50', pretrained=False):
         super().__init__()
         self.backbone_name = backbone
