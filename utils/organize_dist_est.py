@@ -2,7 +2,9 @@ import json
 import re
 from tqdm import tqdm
 
-with open('data/train/train.json', 'r') as file:
+DATA_DIR = '/home/jing/Desktop/DLCV_Final1'
+
+with open(DATA_DIR + '/train.json', 'r') as file:
     data = json.load(file)
 
 data = [q for q in data if q['category'] == 'distance']
@@ -30,11 +32,11 @@ for item in tqdm(data):
     assert len(refined_item['rle']) == 2, f"Expected 2 RLEs, got {len(refined_item['rle'])} for item ID {item['id']}"
     refined_data.append(refined_item)
 
-with open('data/train/train_dist_est.json', 'w') as file:
+with open(DATA_DIR + '/train/train_dist_est.json', 'w') as file:
     json.dump(refined_data, file, indent=4)
 
 
-with open('data/val/val.json', 'r') as file:
+with open(DATA_DIR + '/val.json', 'r') as file:
     data = json.load(file)
     data = [item for item in data if item['category'] == 'distance']
 
@@ -61,5 +63,5 @@ for item in tqdm(data):
     assert len(refined_item['rle']) == 2, f"Expected 2 RLEs, got {len(refined_item['rle'])} for item ID {item['id']}"
     refined_data.append(refined_item)
 
-with open('data/val/val_dist_est.json', 'w') as file:
+with open(DATA_DIR + '/val/val_dist_est.json', 'w') as file:
     json.dump(refined_data, file, indent=4)
