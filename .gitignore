@@ -1,0 +1,4 @@
+distance_est/runs/*
+distance_est/__pyache__/*
+distance_est/ckpt/*
+*log
