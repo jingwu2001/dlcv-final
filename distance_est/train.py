@@ -1,11 +1,15 @@
 import os
+import argparse
 import contextlib
+import itertools
+import random
 import time
 import psutil
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.optim as optim
+import numpy as np
 from torch.profiler import (
     profile,
     ProfilerActivity,
@@ -32,6 +36,68 @@ PROFILE_LOGDIR = "profiler_logs/distance_est"
 LOG_USAGE_INTERVAL = 10
 
 # TESTRUN_STEPS = 200
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train the distance regressor")
+    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs to train for')
+    parser.add_argument('--resume', type=str, default=None, help='Checkpoint path to resume training from')
+    parser.add_argument('--ckpt-dir', type=str, default='ckpt', help='Directory to store checkpoints')
+    parser.add_argument('--save-interval', type=int, default=2000, help='Number of iterations between intra-epoch checkpoints')
+    parser.add_argument('--log-interval', type=int, default=50, help='Number of iterations between loss logs')
+    return parser.parse_args()
+
+
+def _save_rng_state(state_dict):
+    state_dict['python_rng_state'] = random.getstate()
+    state_dict['numpy_rng_state'] = np.random.get_state()
+    state_dict['torch_rng_state'] = torch.random.get_rng_state()
+    if torch.cuda.is_available():
+        state_dict['cuda_rng_state'] = torch.cuda.get_rng_state_all()
+
+
+def save_training_state(path, model, optimizer, epoch, iteration, global_step, is_epoch_end=False):
+    state = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'iteration': iteration,
+        'global_step': global_step,
+    }
+    _save_rng_state(state)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(state, path)
+    status = "(epoch end)" if is_epoch_end else ""
+    print(f"Checkpoint saved to {path} {status}")
+
+
+def load_training_state(path, model, optimizer):
+    print(f"Loading checkpoint from {path}")
+    checkpoint = torch.load(path, map_location=DEVICE)
+    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+        model.load_state_dict(checkpoint['model'])
+        if 'optimizer' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+    else:
+        model.load_state_dict(checkpoint)
+        print("Loaded weights only checkpoint; optimizer state not found")
+
+    start_epoch = checkpoint.get('epoch', 0) if isinstance(checkpoint, dict) else 0
+    global_step = checkpoint.get('global_step', 0) if isinstance(checkpoint, dict) else 0
+    iteration = checkpoint.get('iteration', 0) if isinstance(checkpoint, dict) else 0
+
+    if isinstance(checkpoint, dict):
+        if 'python_rng_state' in checkpoint:
+            random.setstate(checkpoint['python_rng_state'])
+        if 'numpy_rng_state' in checkpoint:
+            np.random.set_state(checkpoint['numpy_rng_state'])
+        if 'torch_rng_state' in checkpoint:
+            torch.random.set_rng_state(checkpoint['torch_rng_state'])
+        if torch.cuda.is_available() and 'cuda_rng_state' in checkpoint:
+            torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
+
+    print(f"Resumed training from epoch {start_epoch}, iteration {iteration}, global step {global_step}")
+    return start_epoch, global_step, iteration
 
 if ENABLE_PROFILING:
     os.makedirs(PROFILE_LOGDIR, exist_ok=True)
@@ -131,88 +197,125 @@ criterion = nn.MSELoss()
 print(f"Dataset size: {len(dataset)}")
 print(f"Number of batches: {len(loader)}")
 print(next(iter(loader))[0].shape)
-# Training loop
-num_epochs = 5
-# Limit batches for dry run if needed, but for now we'll just run it.
-for epoch in range(num_epochs):
-    print(f"Starting epoch {epoch + 1}/{num_epochs}")
-    model.train()
-    total_loss = 0
-    epoch_loss = 0
-    num_batches = len(loader)
-    log_interval = 50
-    save_interval = 2000
 
-    if ENABLE_PROFILING:
-        profiler_ctx = profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        schedule=profiler_schedule(wait=5, warmup=5, active=10),
-        record_shapes=True,
-        profile_memory=True,
-        on_trace_ready=tensorboard_trace_handler(PROFILE_LOGDIR),
-        with_stack=True,
-        )
-    else:
-        profiler_ctx = contextlib.nullcontext()
 
-    with profiler_ctx as prof:
-        prof_enabled = ENABLE_PROFILING
+def main():
+    args = parse_args()
+    num_epochs = args.epochs
+    log_interval = args.log_interval
+    save_interval = args.save_interval
+    ckpt_dir = args.ckpt_dir
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-        pbar = tqdm(loader)
-        data_fetch_start = time.perf_counter()
-        for i, (inputs, targets) in enumerate(pbar):
-            if i == 0:
-                print("inputs.shape:", inputs.shape)
-            data_wait = time.perf_counter() - data_fetch_start
-            iter_start = time.perf_counter()
-            inputs, targets = inputs.to(DEVICE, non_blocking=True), targets.to(DEVICE, non_blocking=True)
-            preds = model(inputs)
-            loss = criterion(preds, targets)
+    start_epoch = 0
+    resume_iter = 0
+    global_step = 0
+    if args.resume:
+        start_epoch, global_step, resume_iter = load_training_state(args.resume, model, optimizer)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            iter_duration = time.perf_counter() - iter_start
+    if start_epoch >= num_epochs:
+        print(f"Start epoch {start_epoch} is >= configured num_epochs {num_epochs}, nothing to train.")
+        return
+
+    special_save_iters = [50, 100, 150]
+
+    for epoch in range(start_epoch, num_epochs):
+        print(f"Starting epoch {epoch + 1}/{num_epochs}")
+        model.train()
+        epoch_loss = 0.0
+        num_batches = len(loader)
+        current_start_iter = resume_iter if epoch == start_epoch else 0
+        resume_iter = 0
+
+        if current_start_iter >= num_batches:
+            print(f"Resume iteration {current_start_iter} exceeds number of batches {num_batches}; skipping epoch.")
+            continue
+
+        epoch_iterable = loader
+        if current_start_iter > 0:
+            epoch_iterable = itertools.islice(loader, current_start_iter, None)
+
+        effective_batches = num_batches - current_start_iter
+
+        if ENABLE_PROFILING:
+            profiler_ctx = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=profiler_schedule(wait=5, warmup=5, active=10),
+                record_shapes=True,
+                profile_memory=True,
+                on_trace_ready=tensorboard_trace_handler(PROFILE_LOGDIR),
+                with_stack=True,
+            )
+        else:
+            profiler_ctx = contextlib.nullcontext()
+
+        with profiler_ctx:
             data_fetch_start = time.perf_counter()
+            pbar = tqdm(epoch_iterable, total=effective_batches if effective_batches > 0 else None)
+            for batch_idx, (inputs, targets) in enumerate(pbar, start=current_start_iter):
+                if batch_idx == current_start_iter:
+                    print("inputs.shape:", inputs.shape)
 
-            batch_loss = loss.item()
-            gpu_util, gpu_mem = get_gpu_stats()
-            postfix = {
-                'loss': f'{batch_loss:.4f}',
-                'data_s': f'{data_wait:.3f}',
-                'step_s': f'{iter_duration:.3f}',
-            }
-            if gpu_util is not None:
-                postfix['GPU%'] = f'{gpu_util:3.0f}'
-            if gpu_mem is not None:
-                postfix['GPU_GB'] = f'{gpu_mem:.2f}'
+                data_wait = time.perf_counter() - data_fetch_start
+                iter_start = time.perf_counter()
+                inputs, targets = inputs.to(DEVICE, non_blocking=True), targets.to(DEVICE, non_blocking=True)
+                preds = model(inputs)
+                loss = criterion(preds, targets)
 
-            if (i + 1) % LOG_USAGE_INTERVAL == 0:
-                mem, cpu = get_process_stats()
-                postfix['RAM'] = f'{mem:.2f}GB'
-                postfix['CPU'] = f'{cpu:.1f}%'
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                global_step += 1
 
-            pbar.set_postfix(postfix)
-            epoch_loss += batch_loss
+                iter_duration = time.perf_counter() - iter_start
+                data_fetch_start = time.perf_counter()
 
-            if (i + 1) % log_interval == 0 or (i + 1) == num_batches:
-                print(f"[Epoch {epoch+1}/{num_epochs}] "
-                      f"Iter {i+1}/{num_batches} "
-                      f"Loss: {batch_loss:.4f}")
+                batch_loss = loss.item()
+                gpu_util, gpu_mem = get_gpu_stats()
+                postfix = {
+                    'loss': f'{batch_loss:.4f}',
+                    'data_s': f'{data_wait:.3f}',
+                    'step_s': f'{iter_duration:.3f}',
+                }
+                if gpu_util is not None:
+                    postfix['GPU%'] = f'{gpu_util:3.0f}'
+                if gpu_mem is not None:
+                    postfix['GPU_GB'] = f'{gpu_mem:.2f}'
+
+                if (batch_idx + 1) % LOG_USAGE_INTERVAL == 0:
+                    mem, cpu = get_process_stats()
+                    postfix['RAM'] = f'{mem:.2f}GB'
+                    postfix['CPU'] = f'{cpu:.1f}%'
+
+                pbar.set_postfix(postfix)
+                epoch_loss += batch_loss
+
+                if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
+                    print(f"[Epoch {epoch+1}/{num_epochs}] Iter {batch_idx+1}/{num_batches} Loss: {batch_loss:.4f}")
+
+                should_save = False
+                if epoch == 0 and batch_idx in special_save_iters:
+                    should_save = True
+                if save_interval > 0 and (batch_idx + 1) % save_interval == 0 and epoch > 3:
+                    should_save = True
+
+                if should_save:
+                    ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch+1}_iter_{batch_idx + 1}.pth")
+                    save_training_state(ckpt_path, model, optimizer, epoch, batch_idx + 1, global_step)
+
+                # if (batch_idx + 1) >= TESTRUN_STEPS:
+                #     print(f"Stopping epoch early after {TESTRUN_STEPS} steps to write profiler trace.")
+                #     break
+
+        processed_batches = num_batches - current_start_iter
+        if processed_batches == 0:
+            continue
+        avg_loss = epoch_loss / processed_batches
+        print(f"[Epoch {epoch+1}/{num_epochs}] Average Loss: {avg_loss:.4f}")
+
+        final_path = os.path.join(ckpt_dir, f"epoch_{epoch+1}_final.pth")
+        save_training_state(final_path, model, optimizer, epoch + 1, 0, global_step, is_epoch_end=True)
 
 
-            if (epoch == 0 and (i in [50, 100, 150])) or ((i + 1) % save_interval == 0 and epoch > 3):
-                torch.save(model.state_dict(), f"ckpt/epoch_{epoch+1}_iter_{i+1}.pth")
-                print(f"Model saved at epoch {epoch+1}, iteration {i+1}")
-
-            # if (i + 1) >= TESTRUN_STEPS:
-            #     print(f"Stopping epoch early after {TESTRUN_STEPS} steps to write profiler trace.")
-            #     break
-
-    avg_loss = epoch_loss / num_batches
-    print(f"[Epoch {epoch+1}/{num_epochs}] Average Loss: {avg_loss:.4f}")
-
-    torch.save(model.state_dict(), f"ckpt/epoch_{epoch+1}_iter_{i+1}.pth")
-    print(f"Model saved at epoch {epoch+1}, iteration {i+1}")
-
-
+if __name__ == "__main__":
+    main()
